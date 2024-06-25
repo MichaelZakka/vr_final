@@ -1,52 +1,59 @@
 using UnityEngine;
 using System.Collections.Generic;
+
 public class AerodynamicSimulation : MonoBehaviour
 {
     List<Particle> particles = new List<Particle>();
     public GameObject sphere;
-    public int particlesCount = 100; 
+    public int particlesCount = 50; 
     public float particleRadius = 0.2f;
     public float particleMass = 0.00125f;
     public float spawnRadius = 5f;
     public Vector3 gravityDirection = Vector3.down;
-    public float windSpeed = 2f;
+    public float windSpeed = 10f;
+    
     private float timeCounter = 0f;
-
     public float lift = 1.0f;
     public float drag = 0.47f; 
     public float airDensity = 1.225f;  
-    public Vector3 volumeSize = new Vector3(30, 30, 30);
+    public Vector3 volumeSize = new Vector3(20, 20, 20);
     private MeshSplitter meshSplitter;
     private List<Triangle> triangles;
-    // private Dictionary<Vector3Int, List<Particle>> spatialHashGrid = new Dictionary<Vector3Int, List<Particle>>();
-    // public float cellSize = 0.9f;
+    public float springConstant = 50.0f;
+    public float dampingConstant = 5.0f;
+
 
     void Start()
     {
+       
         InitializeParticles();
         meshSplitter = GetComponent<MeshSplitter>();
         if (meshSplitter != null)
         {
-            triangles = meshSplitter.GetTriangles();
+            triangles = MeshSplitter.triangles;
         }
-           
-
+        else
+        {
+            Debug.Log("MeshSplitter component not found.");
+        }
     }
 
     void Update()
     {
+        
         timeCounter += Time.deltaTime;
         //InitializeParticles();
         foreach (Particle particle in particles)
         {
             CalculateForces(particle);
             ApplyGravity(particle);
+            //ApplySpring(particle);
            
             
         }
         foreach (var particle in particles)
         {
-            BoundaryCollisions(particle);
+            HandleBoundaryCollisions(particle);
         }
         
         for (int i = 0; i < particles.Count; i++)
@@ -58,22 +65,20 @@ public class AerodynamicSimulation : MonoBehaviour
 
         if (triangles != null)
         {
-            ResolveParticleTriangleCollisions(particles[i], triangles);
+            ResolveCollisionForParticlesAndTriangles(particles[i], triangles);
         }
     }
-        
-        
     }
-
-    
     void InitializeParticles()
     {
         int maxAttempts = 1000; 
         
+
         for (int i = 0; i < particlesCount; i++)
         {
             Vector3 randomVector;
             bool validPosition;
+
             int attempts = 0;
 
             do
@@ -102,6 +107,8 @@ public class AerodynamicSimulation : MonoBehaviour
                 }
             } while (!validPosition);
 
+         
+
             GameObject oneParticle = Instantiate(sphere, randomVector, Quaternion.identity);
             Particle newParticle = oneParticle.AddComponent<Particle>();
             newParticle.position = randomVector;
@@ -110,23 +117,34 @@ public class AerodynamicSimulation : MonoBehaviour
             particles.Add(newParticle);
         }
     }
-
     void CalculateForces(Particle particle)
     {
         Vector3 relativeVelocity = particle.velocity - new Vector3(windSpeed, 0, 0);
         float speed = relativeVelocity.magnitude;
-
+        if (speed == 0)
+        {
+            return;
+        }
         Vector3 dragForce = -0.5f * airDensity * speed * speed * drag * Mathf.PI * Mathf.Pow(particleRadius, 2) * relativeVelocity.normalized;
 
+        
         Vector3 liftDirection = Vector3.Cross(relativeVelocity.normalized, Vector3.up).normalized;
+        if (liftDirection == Vector3.zero)
+        {
+            return; 
+        }
         Vector3 liftForce = 0.5f * airDensity * speed * speed * lift * Mathf.PI * Mathf.Pow(particleRadius, 2) * liftDirection;
         
         Vector3 totalForce = dragForce + liftForce;
         
         float damping = 0.99f;
         particle.velocity = particle.velocity * damping + totalForce / particleMass * Time.deltaTime;
+
+        
+
         particle.position += particle.velocity * Time.deltaTime;
         particle.sphere.transform.position = particle.position;
+        
     }
 
     void ApplyGravity(Particle particle)
@@ -137,12 +155,48 @@ public class AerodynamicSimulation : MonoBehaviour
         particle.sphere.transform.position = particle.position;
     }
 
-    void BoundaryCollisions(Particle particle)
+    
+    void ResolveCollisionForParticles(Particle p1, Particle p2)
+{
+    Vector3 delta = p1.position - p2.position;
+    float distance = delta.magnitude;
+    float minDistance = 2 * particleRadius;
+
+    if (distance < minDistance)
+    {
+        Vector3 normal = delta.normalized;
+        float penetrationDepth = minDistance - distance;
+
+      
+        Vector3 separation = normal * (penetrationDepth / 2);
+        p1.position += separation;
+        p2.position -= separation;
+
+       
+        p1.sphere.transform.position = p1.position;
+        p2.sphere.transform.position = p2.position;
+
+        
+        Vector3 relativeVelocity = p1.velocity - p2.velocity;
+        float separatingVelocity = Vector3.Dot(relativeVelocity, normal);
+        if (separatingVelocity < 0)
+        {
+            float totalMass = particleMass * 2;
+            float impulse = -(1.0f + 0.5f) * separatingVelocity / totalMass;
+
+            Vector3 impulseVector = impulse * normal;
+            p1.velocity += impulseVector * (particleMass / totalMass);
+            p2.velocity -= impulseVector * (particleMass / totalMass);
+        }
+    }
+}
+
+    void HandleBoundaryCollisions(Particle particle)
     {
         Vector3 minBounds = -volumeSize / 2;
         Vector3 maxBounds = volumeSize / 2;
         float dampingFactor = 0.8f;
-        
+
         for (int i = 0; i < 3; i++)
         {
             if (particle.position[i] < minBounds[i])
@@ -157,162 +211,87 @@ public class AerodynamicSimulation : MonoBehaviour
             }
         }
         particle.transform.position = particle.position;
+        
     }
-
-    void ResolveCollisionForParticles(Particle p1, Particle p2)
+    void ResolveCollisionForParticlesAndTriangles(Particle particle, List<Triangle> triangles)
+{
+    foreach (var triangle in triangles)
     {
-        Vector3 delta = p1.position - p2.position;
+        Vector3 closestPoint = ClosestPointOnTriangle(particle.position, triangle);
+        Vector3 delta = particle.position - closestPoint;
         float distance = delta.magnitude;
-        float minDistance = 2 * particleRadius;
 
-        if (distance < minDistance)
+        if (distance < particleRadius)
         {
             Vector3 normal = delta.normalized;
-            float penetrationDepth = minDistance - distance;
-            Vector3 correction = normal * (penetrationDepth / 2);
+            float penetrationDepth = particleRadius - distance;
 
-            p1.position += correction;
-            p2.position -= correction;
+            // Adjust particle position to resolve penetration
+            particle.position += normal * penetrationDepth;
+            particle.sphere.transform.position = particle.position;
 
-            float restitution = 0.8f;
+            // Calculate the relative velocity
+            Vector3 relativeVelocity = particle.velocity;
+            float separatingVelocity = Vector3.Dot(relativeVelocity, normal);
 
-            Vector3 relativeVelocity = p1.velocity - p2.velocity;
-            float velocityAlongNormal = Vector3.Dot(relativeVelocity, normal);
+            if (separatingVelocity < 0)
+            {
+                float impulse = -(1.0f + 0.5f) * separatingVelocity;
+                Vector3 impulseVector = impulse * normal;
 
-            if (velocityAlongNormal > 0) return;
-
-            float j = -(1 + restitution) * velocityAlongNormal / 2;
-            Vector3 impulse = j * normal;
-
-            p1.velocity += impulse;
-            p2.velocity -= impulse;
+                // Apply impulse to the particle's velocity
+                particle.velocity += impulseVector;
+            }
         }
     }
-    void ResolveParticleTriangleCollisions(Particle particle, List<Triangle> triangles)
+}
+
+Vector3 ClosestPointOnTriangle(Vector3 point, Triangle triangle)
+{
+    Vector3[] vertices = triangle.GetVertices();
+    Vector3 v0 = vertices[1] - vertices[0];
+    Vector3 v1 = vertices[2] - vertices[0];
+    Vector3 v2 = point - vertices[0];
+
+    float d00 = Vector3.Dot(v0, v0);
+    float d01 = Vector3.Dot(v0, v1);
+    float d11 = Vector3.Dot(v1, v1);
+    float d20 = Vector3.Dot(v2, v0);
+    float d21 = Vector3.Dot(v2, v1);
+
+    float denom = d00 * d11 - d01 * d01;
+    float v = (d11 * d20 - d01 * d21) / denom;
+    float w = (d00 * d21 - d01 * d20) / denom;
+    float u = 1.0f - v - w;
+
+    u = Mathf.Clamp01(u);
+    v = Mathf.Clamp01(v);
+    w = Mathf.Clamp01(w);
+
+    return vertices[0] * u + vertices[1] * v + vertices[2] * w;
+}
+    void ApplySpring(Particle particle)
     {
-        foreach (var triangle in triangles)
-        {
-            Vector3 closestPoint = ClosestPointOnTriangle(particle.position, triangle);
-            Vector3 delta = particle.position - closestPoint;
-            float distance = delta.magnitude;
+       
+        Vector3 targetPosition = particle.position + new Vector3(
+            Random.Range(-0.05f, 0.05f),
+            Random.Range(-0.05f, 0.05f),
+            Random.Range(-0.05f, 0.05f)
+        );
 
-            if (distance < particleRadius)
-            {
-                 Debug.Log("Collision detected with triangle at " + closestPoint);
-                Vector3 normal = delta.normalized;
-                float penetrationDepth = particleRadius - distance;
 
-                particle.position += normal * penetrationDepth;
-                particle.sphere.transform.position = particle.position;
+        Vector3 displacement = targetPosition - particle.position; 
+        Vector3 springForce = springConstant * displacement; 
+        Vector3 dampingForce = -dampingConstant * particle.velocity; 
 
-                Vector3 relativeVelocity = particle.velocity;
-                float separatingVelocity = Vector3.Dot(relativeVelocity, normal);
+        Vector3 force = springForce + dampingForce;
 
-                if (separatingVelocity < 0)
-                {
-                    float impulse = -(1.0f + 0.5f) * separatingVelocity;
-                    Vector3 impulseVector = impulse * normal;
+        particle.velocity += force / particleMass * Time.deltaTime; 
+        particle.position += particle.velocity * Time.deltaTime; 
+        particle.sphere.transform.position = particle.position; 
+    }   
 
-                    particle.velocity += impulseVector;
-                }
-            }
-        }
-    }
 
-    Vector3 ClosestPointOnTriangle(Vector3 point, Triangle triangle)
-    {
-        Vector3 edge0 = triangle.v1 - triangle.v0;
-        Vector3 edge1 = triangle.v2 - triangle.v0;
-        Vector3 v0ToPoint = point - triangle.v0;
 
-        float a = Vector3.Dot(edge0, edge0);
-        float b = Vector3.Dot(edge0, edge1);
-        float c = Vector3.Dot(edge1, edge1);
-        float d = Vector3.Dot(edge0, v0ToPoint);
-        float e = Vector3.Dot(edge1, v0ToPoint);
-
-        float det = a * c - b * b;
-        float s = b * e - c * d;
-        float t = b * d - a * e;
-
-        if (s + t <= det)
-        {
-            if (s < 0)
-            {
-                if (t < 0)
-                {
-                    if (d < 0)
-                    {
-                        s = Mathf.Clamp01(-d / a);
-                        t = 0;
-                    }
-                    else
-                    {
-                        s = 0;
-                        t = Mathf.Clamp01(-e / c);
-                    }
-                }
-                else
-                {
-                    s = 0;
-                    t = Mathf.Clamp01(-e / c);
-                }
-            }
-            else if (t < 0)
-            {
-                s = Mathf.Clamp01(-d / a);
-                t = 0;
-            }
-            else
-            {
-                s /= det;
-                t /= det;
-            }
-        }
-        else
-        {
-            if (s < 0)
-            {
-                float tmp0 = b + d;
-                float tmp1 = c + e;
-                if (tmp1 > tmp0)
-                {
-                    float numer = tmp1 - tmp0;
-                    float denom = a - 2 * b + c;
-                    s = Mathf.Clamp01(numer / denom);
-                    t = 1 - s;
-                }
-                else
-                {
-                    t = Mathf.Clamp01(-e / c);
-                    s = 0;
-                }
-            }
-            else if (t < 0)
-            {
-                if (a + d > b + e)
-                {
-                    float numer = c + e - b - d;
-                    float denom = a - 2 * b + c;
-                    s = Mathf.Clamp01(numer / denom);
-                    t = 1 - s;
-                }
-                else
-                {
-                    s = Mathf.Clamp01(-d / a);
-                    t = 0;
-                }
-            }
-            else
-            {
-                float numer = c + e - b - d;
-                float denom = a - 2 * b + c;
-                s = Mathf.Clamp01(numer / denom);
-                t = 1 - s;
-            }
-        }
-
-        return triangle.v0 + edge0 * s + edge1 * t;
-    }
-
+    
 }

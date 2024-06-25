@@ -3,118 +3,149 @@ using System.Collections.Generic;
 
 public class MeshSplitter : MonoBehaviour
 {
-    public GameObject planeObject;
-    private Mesh originalMesh;
-    private Plane cuttingPlane;
-    private Vector3[] vertices;
-    private int[] triangles;
+    [Range(0.0f, 0.1f)]
+    public float mergeThreshold = 0.001f;
 
-    private List<Triangle> triangleList = new List<Triangle>(); // List to store Triangle objects
+    public static List<Triangle> triangles = new List<Triangle>();
 
     void Start()
     {
-        originalMesh = GetComponent<MeshFilter>().mesh;
-        cuttingPlane = new Plane(planeObject.transform.up, planeObject.transform.position);
-        vertices = originalMesh.vertices;
-        triangles = originalMesh.triangles;
+        MeshFilter meshFilter = GetComponent<MeshFilter>();
 
-        SplitMesh(originalMesh);
+        if (meshFilter == null)
+        {
+            Debug.LogError("MeshFilter not found on " + gameObject.name);
+            return;
+        }
+
+        Mesh mesh = meshFilter.mesh;
+        Mesh simplifiedMesh = SimplifyMesh(mesh, mergeThreshold);
+
+        Vector3[] vertices = simplifiedMesh.vertices;
+        int[] trianglesIndices = simplifiedMesh.triangles;
+
+        GameObject triangleParent = new GameObject(gameObject.name + "_TrianglePieces");
+        triangleParent.transform.position = transform.position;
+        triangleParent.transform.rotation = transform.rotation;
+        triangleParent.transform.localScale = transform.localScale;
+
+        for (int i = 0; i < trianglesIndices.Length; i += 3)
+        {
+            int vertexIndex1 = trianglesIndices[i];
+            int vertexIndex2 = trianglesIndices[i + 1];
+            int vertexIndex3 = trianglesIndices[i + 2];
+
+            Vector3 vertex1 = vertices[vertexIndex1];
+            Vector3 vertex2 = vertices[vertexIndex2];
+            Vector3 vertex3 = vertices[vertexIndex3];
+
+            vertex1 = transform.TransformPoint(vertex1);
+            vertex2 = transform.TransformPoint(vertex2);
+            vertex3 = transform.TransformPoint(vertex3);
+
+            Triangle triangle = new Triangle(vertex1, vertex2, vertex3);
+            triangles.Add(triangle);
+
+            Mesh triangleMesh = new Mesh();
+            triangleMesh.vertices = new Vector3[] { vertex1, vertex2, vertex3 };
+            triangleMesh.triangles = new int[] { 0, 1, 2 };
+
+            GameObject triangleObject = new GameObject("Triangle_" + (i / 3));
+            triangleObject.transform.SetParent(triangleParent.transform);
+
+            MeshFilter triangleMeshFilter = triangleObject.AddComponent<MeshFilter>();
+            triangleMeshFilter.mesh = triangleMesh;
+
+            MeshRenderer triangleMeshRenderer = triangleObject.AddComponent<MeshRenderer>();
+            triangleMeshRenderer.material = GetComponent<MeshRenderer>().material;
+
+            Vector3 triangleCenter = (vertex1 + vertex2 + vertex3) / 3.0f;
+
+            
+            triangleObject.transform.position = triangleCenter;
+
+            
+            Vector3[] localVertices = new Vector3[] {
+                vertex1 - triangleCenter,
+                vertex2 - triangleCenter,
+                vertex3 - triangleCenter
+            };
+
+            
+            triangleMesh.vertices = localVertices;
+            triangleMesh.RecalculateBounds();
+            
+        }
+
+        Debug.Log("Model splitted");
     }
 
-    void SplitMesh(Mesh mesh)
+    Mesh SimplifyMesh(Mesh mesh, float threshold)
     {
-        List<Vector3> abovePlaneVertices = new List<Vector3>();
-        List<Vector3> belowPlaneVertices = new List<Vector3>();
+        Vector3[] vertices = mesh.vertices;
+        int[] triangles = mesh.triangles;
+        List<Vector3> simplifiedVertices = new List<Vector3>();
+        List<int> simplifiedIndices = new List<int>();
+        Dictionary<int, int> vertexMap = new Dictionary<int, int>();
+
+        for (int i = 0; i < vertices.Length; i++)
+        {
+            bool merged = false;
+            for (int j = 0; j < simplifiedVertices.Count; j++)
+            {
+                if (Vector3.Distance(vertices[i], simplifiedVertices[j]) < threshold)
+                {
+                    vertexMap[i] = j;
+                    merged = true;
+                    break;
+                }
+            }
+            if (!merged)
+            {
+                vertexMap[i] = simplifiedVertices.Count;
+                simplifiedVertices.Add(vertices[i]);
+            }
+        }
 
         for (int i = 0; i < triangles.Length; i += 3)
         {
-            Vector3 v0 = transform.TransformPoint(vertices[triangles[i]]);
-            Vector3 v1 = transform.TransformPoint(vertices[triangles[i + 1]]);
-            Vector3 v2 = transform.TransformPoint(vertices[triangles[i + 2]]);
+            int newVertexIndex1 = vertexMap[triangles[i]];
+            int newVertexIndex2 = vertexMap[triangles[i + 1]];
+            int newVertexIndex3 = vertexMap[triangles[i + 2]];
 
-            bool v0Above = cuttingPlane.GetSide(v0);
-            bool v1Above = cuttingPlane.GetSide(v1);
-            bool v2Above = cuttingPlane.GetSide(v2);
-
-            if (v0Above || v1Above || v2Above)
+            if (newVertexIndex1 != newVertexIndex2 && newVertexIndex1 != newVertexIndex3 && newVertexIndex2 != newVertexIndex3)
             {
-                abovePlaneVertices.Add(v0);
-                abovePlaneVertices.Add(v1);
-                abovePlaneVertices.Add(v2);
-                triangleList.Add(new Triangle(v0, v1, v2)); // Add triangle to list
+                simplifiedIndices.Add(newVertexIndex1);
+                simplifiedIndices.Add(newVertexIndex2);
+                simplifiedIndices.Add(newVertexIndex3);
             }
-            if (!v0Above || !v1Above || !v2Above)
-            {
-                belowPlaneVertices.Add(v0);
-                belowPlaneVertices.Add(v1);
-                belowPlaneVertices.Add(v2);
-                triangleList.Add(new Triangle(v0, v1, v2)); // Add triangle to list
-            }
-
-            Debug.Log($"Added triangle: {v0}, {v1}, {v2}");
         }
 
-        CreateMeshPart(abovePlaneVertices, "AbovePlaneMesh");
-        CreateMeshPart(belowPlaneVertices, "BelowPlaneMesh");
-    }
+        Mesh simplifiedMesh = new Mesh();
+        simplifiedMesh.vertices = simplifiedVertices.ToArray();
+        simplifiedMesh.triangles = simplifiedIndices.ToArray();
+        simplifiedMesh.RecalculateNormals();
 
-    void CreateMeshPart(List<Vector3> verticesList, string name)
-    {
-        if (verticesList.Count == 0) return;
-
-        GameObject newObject = new GameObject(name, typeof(MeshFilter), typeof(MeshRenderer), typeof(MeshCollider));
-        newObject.transform.position = transform.position;
-        newObject.transform.rotation = transform.rotation;
-
-        Mesh newMesh = new Mesh();
-        newMesh.vertices = verticesList.ToArray();
-        
-        List<int> newTriangles = new List<int>();
-        for (int i = 0; i < verticesList.Count; i += 3)
-        {
-            newTriangles.Add(i);
-            newTriangles.Add(i + 1);
-            newTriangles.Add(i + 2);
-        }
-        newMesh.triangles = newTriangles.ToArray();
-
-        newMesh.RecalculateNormals();
-        newMesh.RecalculateBounds();
-
-        newObject.GetComponent<MeshFilter>().mesh = newMesh;
-        newObject.GetComponent<MeshCollider>().sharedMesh = newMesh;
-        newObject.GetComponent<MeshCollider>().convex = true;
-
-        Debug.Log($"{name} created with {verticesList.Count / 3} triangles");
-    }
-
-    public List<Triangle> GetTriangles()
-    {
-        return triangleList;
-    }
-
-    void OnDrawGizmos()
-    {
-        if (planeObject != null)
-        {
-            Gizmos.color = Color.red;
-            Gizmos.DrawLine(planeObject.transform.position, planeObject.transform.position + planeObject.transform.up * 5);
-            Gizmos.DrawLine(planeObject.transform.position, planeObject.transform.position - planeObject.transform.up * 5);
-        }
+        return simplifiedMesh;
     }
 }
-
 
 public class Triangle
 {
-    public Vector3 v0;
     public Vector3 v1;
     public Vector3 v2;
+    public Vector3 v3;
 
-    public Triangle(Vector3 v0, Vector3 v1, Vector3 v2)
+    public Triangle(Vector3 vertex1, Vector3 vertex2, Vector3 vertex3)
     {
-        this.v0 = v0;
-        this.v1 = v1;
-        this.v2 = v2;
+        v1 = vertex1;
+        v2 = vertex2;
+        v3 = vertex3;
+    }
+
+    public Vector3[] GetVertices()
+    {
+        return new Vector3[] { v1, v2, v3 };
     }
 }
+
